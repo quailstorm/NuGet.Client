@@ -70,7 +70,7 @@ namespace NuGet.Protocol
                 throw new ArgumentNullException(nameof(log));
             }
 
-            return GetPackagesFromNupkgs(GetNupkgsFromFlatFolder(root, log, cancellationToken), cancellationToken);
+            return GetPackagesFromNupkgs(GetNupkgsFromFlatFolder(root, log, cancellationToken), log, cancellationToken);
         }
 
         /// <summary>
@@ -106,7 +106,7 @@ namespace NuGet.Protocol
                 throw new ArgumentNullException(nameof(log));
             }
 
-            foreach (var package in GetPackagesFromNupkgs(GetNupkgsFromFlatFolder(root, id, log, cancellationToken), cancellationToken))
+            foreach (var package in GetPackagesFromNupkgs(GetNupkgsFromFlatFolder(root, id, log, cancellationToken), log, cancellationToken))
             {
                 // Filter out any packages that were incorrectly identified
                 // Ex: id: packageA.1 version: 1.0 -> packageA.1.1.0 -> packageA 1.1.0
@@ -1206,10 +1206,10 @@ namespace NuGet.Protocol
         /// <summary>
         /// Path -> LocalPackageInfo
         /// </summary>
-        private static IEnumerable<LocalPackageInfo> GetPackagesFromNupkgs(IEnumerable<FileInfo> files, CancellationToken cancellationToken)
+        private static IEnumerable<LocalPackageInfo> GetPackagesFromNupkgs(IEnumerable<FileInfo> files, ILogger log, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return files.Select(file => GetPackageFromNupkg(file));
+            return files.Select(file => GetPackageFromNupkgNullable(file, log)).Where(packageInfo => packageInfo != null);
         }
 
         /// <summary>
@@ -1233,6 +1233,53 @@ namespace NuGet.Protocol
                         useFolder: false
                     );
                 }
+            }
+            catch (Exception ex)
+            {
+                var message = string.Format(
+                    CultureInfo.CurrentCulture,
+                    Strings.NupkgPath_InvalidEx,
+                    nupkgFile.FullName,
+                    ex.Message);
+
+                throw new FatalProtocolException(message, ex);
+            }
+        }
+
+        /// <summary>
+        /// Path -> LocalPackageInfo
+        /// </summary>
+        /// <returns>LocalPackageInfo instance if package is found, null if the zip cannot be opened.</returns>
+        private static LocalPackageInfo GetPackageFromNupkgNullable(FileInfo nupkgFile, ILogger log)
+        {
+            try
+            {
+                using (var package = new PackageArchiveReader(nupkgFile.FullName))
+                {
+                    var nuspec = package.NuspecReader;
+
+                    var nuspecHelper = new Lazy<NuspecReader>(() => nuspec);
+
+                    return new LocalPackageInfo(
+                        nuspec.GetIdentity(),
+                        nupkgFile.FullName,
+                        nupkgFile.LastWriteTimeUtc,
+                        nuspecHelper,
+                        useFolder: false
+                    );
+                }
+            }
+            catch (InvalidDataException dmException)
+            {
+                var message = string.Format(
+                    CultureInfo.CurrentCulture,
+                    Strings.NupkgPath_InvalidEx,
+                    nupkgFile.FullName,
+                    dmException.Message);
+
+                log.LogWarning(message);
+
+                return null;
             }
             catch (Exception ex)
             {
